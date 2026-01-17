@@ -1,0 +1,315 @@
+# terraform/outputs.tf
+#
+# PURPOSE: Define all outputs from Terraform deployment
+#
+# WHY THIS FILE EXISTS:
+# - Makes important values easily accessible after deployment
+# - Provides information needed for testing and integration
+# - Documents the deployed infrastructure
+#
+# USAGE:
+# - terraform output                    (show all outputs)
+# - terraform output api_gateway_url   (show specific output)
+# - terraform output -json             (machine-readable format)
+
+# ==============================================================================
+# API GATEWAY OUTPUTS
+# ==============================================================================
+
+output "api_gateway_invoke_url" {
+  description = "Base URL for invoking the API"
+  value       = aws_api_gateway_stage.stations_api.invoke_url
+  # EXAMPLE: https://abc123.execute-api.us-east-1.amazonaws.com/dev
+}
+
+output "api_endpoints_usage" {
+  description = "API endpoints with example usage"
+  value = {
+    list_all_stations = {
+      url     = "${aws_api_gateway_stage.stations_api.invoke_url}/stations"
+      method  = "GET"
+      example = "curl ${aws_api_gateway_stage.stations_api.invoke_url}/stations"
+    }
+    get_station = {
+      url     = "${aws_api_gateway_stage.stations_api.invoke_url}/stations/{station_id}"
+      method  = "GET"
+      example = "curl ${aws_api_gateway_stage.stations_api.invoke_url}/stations/station-01"
+    }
+  }
+}
+
+# ==============================================================================
+# IOT CORE OUTPUTS
+# ==============================================================================
+
+output "iot_endpoint_address" {
+  description = "AWS IoT Core MQTT endpoint for device connections"
+  value       = data.aws_iot_endpoint.mqtt.endpoint_address
+  # EXAMPLE: abc123-ats.iot.us-east-1.amazonaws.com
+  # WHY: Simulator needs this to connect
+}
+
+output "iot_connection_info" {
+  description = "Information needed to connect devices to IoT Core"
+  value = {
+    endpoint      = data.aws_iot_endpoint.mqtt.endpoint_address
+    topic_pattern = "${var.iot_topic_prefix}/{station_id}/telemetry"
+    port          = 8883  # MQTT over TLS
+    protocol      = "MQTT"
+    policy_name   = aws_iot_policy.station_policy.name
+  }
+}
+
+# ==============================================================================
+# DYNAMODB OUTPUTS
+# ==============================================================================
+
+output "dynamodb_table_info" {
+  description = "DynamoDB table information"
+  value = {
+    name         = aws_dynamodb_table.stations.name
+    arn          = aws_dynamodb_table.stations.arn
+    billing_mode = aws_dynamodb_table.stations.billing_mode
+    hash_key     = aws_dynamodb_table.stations.hash_key
+  }
+}
+
+# ==============================================================================
+# S3 OUTPUTS
+# ==============================================================================
+
+output "s3_bucket_info" {
+  description = "S3 bucket information for telemetry storage"
+  value = {
+    name   = aws_s3_bucket.telemetry_data.id
+    arn    = aws_s3_bucket.telemetry_data.arn
+    region = aws_s3_bucket.telemetry_data.region
+  }
+}
+
+# ==============================================================================
+# LAMBDA OUTPUTS
+# ==============================================================================
+
+output "lambda_functions" {
+  description = "Lambda function information"
+  value = {
+    telemetry_handler = {
+      name    = aws_lambda_function.telemetry_handler.function_name
+      arn     = aws_lambda_function.telemetry_handler.arn
+      runtime = aws_lambda_function.telemetry_handler.runtime
+      role    = aws_lambda_function.telemetry_handler.role
+    }
+    api_handler = {
+      name    = aws_lambda_function.api_handler.function_name
+      arn     = aws_lambda_function.api_handler.arn
+      runtime = aws_lambda_function.api_handler.runtime
+      role    = aws_lambda_function.api_handler.role
+    }
+  }
+}
+
+# ==============================================================================
+# CLOUDWATCH OUTPUTS
+# ==============================================================================
+
+output "cloudwatch_log_groups" {
+  description = "CloudWatch log groups for monitoring"
+  value = {
+    telemetry_handler = aws_cloudwatch_log_group.telemetry_handler.name
+    api_handler       = aws_cloudwatch_log_group.api_handler.name
+    api_gateway       = aws_cloudwatch_log_group.api_gateway_logs.name
+  }
+}
+
+output "cloudwatch_dashboard_url" {
+  description = "URL to CloudWatch dashboard (create manually or with Terraform)"
+  value       = "https://console.aws.amazon.com/cloudwatch/home?region=${local.region}#dashboards:"
+  # NOTE: Actual dashboard would be created separately
+}
+
+# ==============================================================================
+# IAM OUTPUTS
+# ==============================================================================
+
+output "iam_roles" {
+  description = "IAM roles created for services"
+  value = {
+    lambda_telemetry = aws_iam_role.lambda_telemetry_role.arn
+    lambda_api       = aws_iam_role.lambda_api_role.arn
+    iot_lambda       = aws_iam_role.iot_lambda_role.arn
+    api_gateway      = aws_iam_role.api_gateway_cloudwatch_role.arn
+  }
+}
+
+# ==============================================================================
+# DEPLOYMENT SUMMARY
+# ==============================================================================
+
+output "deployment_summary" {
+  description = "Summary of deployed infrastructure"
+  value = {
+    project_name = var.project_name
+    environment  = var.environment
+    region       = local.region
+    account_id   = local.account_id
+    
+    # Quick reference
+    test_api      = "${aws_api_gateway_stage.stations_api.invoke_url}/stations"
+    iot_endpoint  = data.aws_iot_endpoint.mqtt.endpoint_address
+    dynamodb_name = aws_dynamodb_table.stations.name
+    s3_bucket     = aws_s3_bucket.telemetry_data.id
+    
+    # CloudWatch URLs
+    lambda_logs_url = "https://console.aws.amazon.com/cloudwatch/home?region=${local.region}#logsV2:log-groups"
+    dynamodb_url    = "https://console.aws.amazon.com/dynamodbv2/home?region=${local.region}#tables"
+    iot_url         = "https://console.aws.amazon.com/iot/home?region=${local.region}#/home"
+  }
+}
+
+# ==============================================================================
+# NEXT STEPS OUTPUT
+# ==============================================================================
+
+output "next_steps" {
+  description = "Post-deployment instructions"
+  value = <<-EOT
+    ✅ Infrastructure deployed successfully!
+    
+    📋 NEXT STEPS:
+    
+    1. CREATE IOT CERTIFICATES:
+       aws iot create-keys-and-certificate \
+         --set-as-active \
+         --certificate-pem-outfile certs/device.pem.crt \
+         --public-key-outfile certs/public.pem.key \
+         --private-key-outfile certs/private.pem.key
+       
+       Download Root CA:
+       curl -o certs/AmazonRootCA1.pem \
+         https://www.amazontrust.com/repository/AmazonRootCA1.pem
+    
+    2. ATTACH POLICY TO CERTIFICATE:
+       aws iot attach-policy \
+         --policy-name ${aws_iot_policy.station_policy.name} \
+         --target <certificate-arn-from-step-1>
+    
+    3. CONFIGURE SIMULATOR:
+       Edit simulation/station_simulator.py:
+       - IOT_ENDPOINT = "${data.aws_iot_endpoint.mqtt.endpoint_address}"
+       - Update certificate paths
+    
+    4. RUN SIMULATOR:
+       cd simulation
+       pip install -r requirements.txt
+       python station_simulator.py --num-stations 10 --interval 5
+    
+    5. TEST API:
+       # List all stations
+       curl ${aws_api_gateway_stage.stations_api.invoke_url}/stations
+       
+       # Get specific station
+       curl ${aws_api_gateway_stage.stations_api.invoke_url}/stations/station-01
+    
+    6. MONITOR IN AWS CONSOLE:
+       - Lambda logs: ${aws_cloudwatch_log_group.telemetry_handler.name}
+       - API Gateway logs: ${aws_cloudwatch_log_group.api_gateway_logs.name}
+       - DynamoDB table: ${aws_dynamodb_table.stations.name}
+       - S3 bucket: ${aws_s3_bucket.telemetry_data.id}
+    
+    📊 USEFUL COMMANDS:
+    
+    # View Lambda logs
+    aws logs tail ${aws_cloudwatch_log_group.telemetry_handler.name} --follow
+    
+    # Query DynamoDB
+    aws dynamodb scan --table-name ${aws_dynamodb_table.stations.name}
+    
+    # List S3 objects
+    aws s3 ls s3://${aws_s3_bucket.telemetry_data.id}/telemetry/ --recursive
+    
+    # View API Gateway metrics
+    aws cloudwatch get-metric-statistics \
+      --namespace AWS/ApiGateway \
+      --metric-name Count \
+      --dimensions Name=ApiName,Value=${aws_api_gateway_rest_api.stations_api.name} \
+      --start-time $(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S) \
+      --end-time $(date -u +%Y-%m-%dT%H:%M:%S) \
+      --period 300 \
+      --statistics Sum
+    
+    🧹 TO DESTROY:
+    terraform destroy
+    
+    ⚠️  WARNING: This will delete all data in DynamoDB and S3!
+  EOT
+}
+
+# ==============================================================================
+# COST ESTIMATION OUTPUT
+# ==============================================================================
+
+output "estimated_monthly_cost" {
+  description = "Rough monthly cost estimation (USD)"
+  value = {
+    disclaimer = "Estimates based on 20 stations, 5-second intervals, light API usage"
+    breakdown = {
+      iot_core         = "$5 (message ingestion)"
+      lambda           = "$2 (compute time)"
+      dynamodb         = "$1 (on-demand reads/writes)"
+      s3               = "$1 (storage + requests)"
+      api_gateway      = "$1 (API calls)"
+      cloudwatch       = "$2 (logs storage)"
+      data_transfer    = "$1 (inter-service data transfer)"
+    }
+    total_estimated = "$12-15/month"
+    note            = "Actual costs may vary based on usage. Monitor AWS Cost Explorer regularly."
+  }
+}
+
+# ==============================================================================
+# TROUBLESHOOTING OUTPUT
+# ==============================================================================
+
+output "troubleshooting_guide" {
+  description = "Common issues and solutions"
+  value = {
+    no_data_in_dynamodb = {
+      issue    = "Telemetry not appearing in DynamoDB"
+      checks   = [
+        "Verify simulator is running and connected",
+        "Check Lambda logs: aws logs tail ${aws_cloudwatch_log_group.telemetry_handler.name}",
+        "Verify IoT Rule is enabled: aws iot get-topic-rule --rule-name ${replace(aws_iot_topic_rule.telemetry_rule.name, "-", "_")}",
+        "Check Lambda permissions in IAM console"
+      ]
+    }
+    api_404_error = {
+      issue  = "API returns 404 Not Found"
+      checks = [
+        "Ensure deployment is complete: terraform output api_gateway_invoke_url",
+        "Verify endpoint URL matches output exactly",
+        "Check API Gateway stage is deployed",
+        "Run: aws apigateway get-deployments --rest-api-id ${aws_api_gateway_rest_api.stations_api.id}"
+      ]
+    }
+    simulator_connection_failed = {
+      issue  = "Simulator can't connect to IoT Core"
+      checks = [
+        "Verify certificates are downloaded and paths are correct",
+        "Check IoT endpoint: ${data.aws_iot_endpoint.mqtt.endpoint_address}",
+        "Confirm policy is attached to certificate",
+        "Test: aws iot describe-endpoint --endpoint-type iot:Data-ATS"
+      ]
+    }
+    high_costs = {
+      issue  = "AWS bill higher than expected"
+      checks = [
+        "Check CloudWatch Logs retention (reduce from 7 days if needed)",
+        "Verify simulator isn't sending too frequently",
+        "Review S3 lifecycle policy",
+        "Check for unexpected Lambda errors causing retries",
+        "Monitor: aws ce get-cost-and-usage"
+      ]
+    }
+  }
+}

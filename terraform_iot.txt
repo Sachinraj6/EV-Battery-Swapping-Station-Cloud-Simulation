@@ -1,0 +1,318 @@
+# terraform/iot.tf
+#
+# PURPOSE: Configure AWS IoT Core for receiving device telemetry
+#
+# WHY THIS FILE EXISTS:
+# - IoT Core is AWS's managed MQTT message broker
+# - Receives messages from stations via MQTT protocol
+# - Routes messages to Lambda for processing
+#
+# KEY CONCEPTS:
+# - Thing: Represents a physical device in IoT Core
+# - Certificate: Device authentication credentials
+# - Policy: Permissions for what device can do
+# - Rule: Routes messages to other AWS services
+
+# ==============================================================================
+# IOT TOPIC RULE
+# ==============================================================================
+
+# IoT Rule to route telemetry to Lambda
+# WHY: IoT Core receives MQTT messages but needs to know what to do with them
+# RULE LOGIC: When message arrives on matching topic -> invoke Lambda
+resource "aws_iot_topic_rule" "telemetry_rule" {
+  name        = replace("${local.name_prefix}_telemetry_rule", "-", "_")
+  # NOTE: IoT Rule names can only contain letters, numbers, underscores
+  # WHY replace: Convert hyphens to underscores for compatibility
+  
+  description = "Route station telemetry to Lambda for processing"
+  enabled     = true
+  
+  # SQL statement to filter messages
+  # WHY SQL: IoT Core uses SQL-like syntax to select/transform messages
+  # FILTER: Matches topic pattern ev/station/+/telemetry
+  # + is wildcard for single topic level (matches any station_id)
+  sql         = "SELECT * FROM '${var.iot_topic_prefix}/+/telemetry'"
+  sql_version = "2016-03-23"  # IoT Rules engine version
+  
+  # Action: What to do with matched messages
+  # We send to Lambda for processing
+  lambda {
+    function_arn = aws_lambda_function.telemetry_handler.arn
+  }
+  
+  # Error handling action (optional)
+  # WHY: Captures failed invocations for debugging
+  # error_action {
+  #   lambda {
+  #     function_arn = aws_lambda_function.error_handler.arn
+  #   }
+  # }
+  
+  tags = merge(
+    local.common_tags,
+    {
+      Name        = "${local.name_prefix}-telemetry-rule"
+      Description = "Routes station telemetry to Lambda"
+    }
+  )
+}
+
+# ==============================================================================
+# EXAMPLE: IOT THINGS (Optional - for device management)
+# ==============================================================================
+
+# Uncomment to create IoT Things representing stations
+# WHY: Things provide device registry and shadow (desired/reported state)
+# 
+# resource "aws_iot_thing" "stations" {
+#   count = var.station_count
+#   
+#   name = "station-${count.index + 1:02d}"
+#   
+#   # Thing Type groups similar devices
+#   thing_type_name = aws_iot_thing_type.battery_swap_station.name
+#   
+#   # Attributes for metadata
+#   attributes = {
+#     location = "Simulated"
+#     version  = "1.0"
+#   }
+# }
+#
+# # Thing Type definition
+# resource "aws_iot_thing_type" "battery_swap_station" {
+#   name = "${local.name_prefix}-battery-swap-station"
+#   
+#   properties {
+#     description           = "EV Battery Swap Station"
+#     searchable_attributes = ["location", "version"]
+#   }
+# }
+
+# ==============================================================================
+# IOT POLICY (For Device Certificates)
+# ==============================================================================
+
+# IoT Policy defines what devices can do
+# WHY: Security - devices should only publish to their own topics
+resource "aws_iot_policy" "station_policy" {
+  name = "${local.name_prefix}-station-policy"
+  
+  # Policy document (JSON format)
+  # PERMISSIONS:
+  # 1. Connect to IoT Core
+  # 2. Publish to telemetry topics
+  # 3. (Optional) Subscribe to command topics
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        # Allow connection to IoT Core
+        # WHY: Device must connect before publishing
+        Effect = "Allow"
+        Action = ["iot:Connect"]
+        Resource = [
+          "arn:aws:iot:${local.region}:${local.account_id}:client/*"
+        ]
+        # Allows any client ID - could restrict to station IDs
+      },
+      {
+        # Allow publishing to telemetry topics
+        # WHY: Stations need to send data
+        Effect = "Allow"
+        Action = ["iot:Publish"]
+        Resource = [
+          "arn:aws:iot:${local.region}:${local.account_id}:topic/${var.iot_topic_prefix}/*/telemetry"
+        ]
+        # * wildcard allows any station_id
+        # SECURITY: Could use ${iot:Connection.Thing.ThingName} to restrict
+      },
+      {
+        # Allow receiving retained messages (optional)
+        # WHY: For command/control scenarios
+        Effect = "Allow"
+        Action = ["iot:Receive"]
+        Resource = [
+          "arn:aws:iot:${local.region}:${local.account_id}:topic/${var.iot_topic_prefix}/*/commands"
+        ]
+      },
+      {
+        # Allow subscribing to command topics (optional)
+        # WHY: For bidirectional communication
+        Effect = "Allow"
+        Action = ["iot:Subscribe"]
+        Resource = [
+          "arn:aws:iot:${local.region}:${local.account_id}:topicfilter/${var.iot_topic_prefix}/*/commands"
+        ]
+      }
+    ]
+  })
+}
+
+# ==============================================================================
+# IOT CERTIFICATES (For Simulator)
+# ==============================================================================
+
+# NOTE: Certificates are typically created outside Terraform
+# WHY: 
+# - Certificate private keys should never be in Terraform state
+# - Usually created manually and distributed securely to devices
+# - For this prototype, create certificates via AWS Console or CLI
+#
+# TO CREATE CERTIFICATES MANUALLY:
+# 1. AWS Console > IoT Core > Security > Certificates > Create
+# 2. Download certificate, public key, private key, root CA
+# 3. Store securely (never commit to git)
+# 4. Update simulator script with certificate paths
+#
+# ALTERNATIVE: Create via CLI
+# aws iot create-keys-and-certificate \
+#   --set-as-active \
+#   --certificate-pem-outfile cert.pem \
+#   --public-key-outfile public.key \
+#   --private-key-outfile private.key
+
+# Example: Attach policy to existing certificate
+# (Uncomment and replace certificate_arn with your actual certificate)
+#
+# resource "aws_iot_policy_attachment" "station_cert" {
+#   policy = aws_iot_policy.station_policy.name
+#   target = "arn:aws:iot:us-east-1:123456789012:cert/abc123..."
+# }
+
+# ==============================================================================
+# IOT CLOUDWATCH LOGGING
+# ==============================================================================
+
+# Configure IoT Core to send logs to CloudWatch
+# WHY: Debug connection issues, policy denials, rule execution
+resource "aws_iot_logging_options" "iot_logs" {
+  default_log_level = var.environment == "prod" ? "WARN" : "INFO"
+  # LEVELS: DEBUG (verbose), INFO, WARN, ERROR, DISABLED
+  # WHY: INFO in dev for debugging, WARN in prod to reduce costs
+  
+  role_arn = aws_iam_role.iot_logging_role.arn
+  
+  # Depends on role being created first
+  depends_on = [
+    aws_iam_role_policy_attachment.iot_logging
+  ]
+}
+
+# IAM role for IoT logging
+# WHY: IoT needs permission to write to CloudWatch
+resource "aws_iam_role" "iot_logging_role" {
+  name               = "${local.name_prefix}-iot-logging-role"
+  description        = "Allows IoT Core to write logs to CloudWatch"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "iot.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+  
+  tags = local.common_tags
+}
+
+# Attach AWS managed policy for IoT logging
+resource "aws_iam_role_policy_attachment" "iot_logging" {
+  role       = aws_iam_role.iot_logging_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSIoTLogging"
+}
+
+# ==============================================================================
+# CLOUDWATCH ALARMS FOR IOT MONITORING
+# ==============================================================================
+
+# Alarm: High rule error rate
+# WHY: Detect when IoT Rule is failing to invoke Lambda
+resource "aws_cloudwatch_metric_alarm" "iot_rule_errors" {
+  alarm_name          = "${local.name_prefix}-iot-rule-errors"
+  alarm_description   = "Alert when IoT Rule has high error rate"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "RuleMessageThrottled"  # Messages dropped due to throttling
+  namespace           = "AWS/IoT"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 10
+  treat_missing_data  = "notBreaching"
+  
+  dimensions = {
+    RuleName = aws_iot_topic_rule.telemetry_rule.name
+  }
+  
+  tags = local.common_tags
+}
+
+# ==============================================================================
+# DOCUMENTATION OUTPUT
+# ==============================================================================
+
+# Output IoT endpoint for simulator configuration
+# WHY: Simulator needs to know where to connect
+output "iot_endpoint" {
+  description = "AWS IoT Core MQTT endpoint for device connections"
+  value       = data.aws_iot_endpoint.mqtt.endpoint_address
+}
+
+# Data source to get IoT endpoint
+# WHY: Endpoint is region-specific and auto-generated by AWS
+data "aws_iot_endpoint" "mqtt" {
+  endpoint_type = "iot:Data-ATS"
+  # ATS endpoint uses Amazon Trust Services certificate
+  # WHY: Required for devices using AWS IoT SDK
+}
+
+output "iot_topic_pattern" {
+  description = "MQTT topic pattern for telemetry messages"
+  value       = "${var.iot_topic_prefix}/{station_id}/telemetry"
+}
+
+output "iot_policy_name" {
+  description = "Name of IoT policy for device certificates"
+  value       = aws_iot_policy.station_policy.name
+}
+
+# ==============================================================================
+# SETUP INSTRUCTIONS (Documentation)
+# ==============================================================================
+
+# After applying this Terraform:
+#
+# 1. CREATE CERTIFICATES:
+#    aws iot create-keys-and-certificate \
+#      --set-as-active \
+#      --certificate-pem-outfile certs/device.pem.crt \
+#      --public-key-outfile certs/public.pem.key \
+#      --private-key-outfile certs/private.pem.key
+#
+# 2. DOWNLOAD ROOT CA:
+#    curl -o certs/AmazonRootCA1.pem \
+#      https://www.amazontrust.com/repository/AmazonRootCA1.pem
+#
+# 3. ATTACH POLICY TO CERTIFICATE:
+#    aws iot attach-policy \
+#      --policy-name <policy-name-from-output> \
+#      --target <certificate-arn-from-step-1>
+#
+# 4. UPDATE SIMULATOR:
+#    Edit simulation/station_simulator.py:
+#    - IOT_ENDPOINT = <endpoint-from-output>
+#    - IOT_CERT_PATH = "../certs/device.pem.crt"
+#    - IOT_KEY_PATH = "../certs/private.pem.key"
+#    - IOT_CA_PATH = "../certs/AmazonRootCA1.pem"
+#
+# 5. ADD TO .gitignore:
+#    certs/
+#    *.pem
+#    *.key
+#    *.crt

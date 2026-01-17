@@ -1,0 +1,180 @@
+# EV Battery-Swapping Station Cloud Simulation
+
+## Project Structure
+
+```
+ev-battery-swap-cloud/
+├── README.md
+├── .gitignore
+├── terraform/
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── iam.tf
+│   ├── dynamodb.tf
+│   ├── s3.tf
+│   ├── lambda.tf
+│   ├── iot.tf
+│   └── api_gateway.tf
+├── lambda/
+│   ├── telemetry_handler.py
+│   ├── api_handler.py
+│   └── requirements.txt
+├── simulation/
+│   ├── station_simulator.py
+│   └── requirements.txt
+├── .github/
+│   └── workflows/
+│       └── validate.yml
+└── docs/
+    ├── architecture.md
+    └── limitations.md
+```
+
+## Quick Start
+
+### Prerequisites
+- AWS Account with CLI configured
+- Terraform >= 1.0
+- Python 3.11+
+- Basic understanding of AWS services
+
+### Deployment Steps
+
+1. **Clone and Setup**
+   ```bash
+   git clone <repo-url>
+   cd ev-battery-swap-cloud
+   ```
+
+2. **Deploy Infrastructure**
+   ```bash
+   cd terraform
+   terraform init
+   terraform plan
+   terraform apply
+   ```
+
+3. **Run Simulation**
+   ```bash
+   cd simulation
+   pip install -r requirements.txt
+   python station_simulator.py
+   ```
+
+4. **Test APIs**
+   ```bash
+   # Get all stations
+   curl https://<api-id>.execute-api.us-east-1.amazonaws.com/prod/stations
+   
+   # Get specific station
+   curl https://<api-id>.execute-api.us-east-1.amazonaws.com/prod/stations/station-01
+   ```
+
+## What This Project Demonstrates
+
+### Cloud Architecture Concepts
+- **Event-Driven Design**: IoT messages trigger Lambda functions
+- **Serverless Computing**: No servers to manage, pay only for execution
+- **Managed Services**: DynamoDB, S3, IoT Core handle scaling automatically
+
+### DevOps Practices
+- **Infrastructure as Code**: Terraform manages all AWS resources
+- **CI/CD Basics**: GitHub Actions validates code changes
+- **Monitoring**: CloudWatch captures logs and metrics
+
+### AWS Services Integration
+- **AWS IoT Core**: MQTT message broker for device communication
+- **Lambda**: Event-driven compute for telemetry processing
+- **DynamoDB**: NoSQL database for current station state
+- **S3**: Object storage for historical telemetry data
+- **API Gateway**: REST APIs for external access
+- **IAM**: Least-privilege access control
+
+## Data Flow
+
+1. **Telemetry Generation**: Python simulator sends MQTT messages
+2. **Message Ingestion**: IoT Core receives and validates messages
+3. **Processing**: IoT Rule triggers Lambda function
+4. **Storage**: 
+   - Latest state → DynamoDB (fast queries)
+   - Raw data → S3 (archival, analysis)
+5. **API Access**: API Gateway + Lambda serve current data
+
+## Honest Limitations
+
+### This is a PROTOTYPE, not production-ready:
+
+- **Scale**: Designed for 10-50 stations, not thousands
+- **Reliability**: No high-availability guarantees
+- **Security**: Basic IAM only, no advanced auth
+- **Analytics**: No real-time dashboards or ML
+- **Monitoring**: Basic CloudWatch, no alerts
+- **Testing**: Manual testing only
+- **Cost**: Not optimized for production efficiency
+
+### What's Missing for Production:
+- Multi-region deployment
+- Advanced monitoring and alerting
+- Comprehensive testing (unit, integration, load)
+- Secrets management
+- WAF and DDoS protection
+- Compliance considerations
+- Disaster recovery procedures
+
+## Cost Estimation (Monthly)
+
+**Expected costs for 20 stations sending data every 5 seconds:**
+
+- IoT Core: ~$5 (message ingestion)
+- Lambda: ~$2 (processing)
+- DynamoDB: ~$1 (on-demand)
+- S3: ~$1 (storage)
+- API Gateway: ~$1 (few requests)
+- CloudWatch: ~$2 (logs)
+
+**Total: ~$12/month**
+
+(Actual costs vary with usage patterns)
+
+## Learning Outcomes
+
+After completing this project, you'll understand:
+
+1. How IoT devices communicate with cloud platforms
+2. Event-driven serverless architecture patterns
+3. Infrastructure as Code principles with Terraform
+4. Basic CI/CD pipeline implementation
+5. AWS service integration and IAM policies
+6. Trade-offs in cloud architecture design
+
+## Next Steps for Learning
+
+1. Add CloudWatch Alarms for high battery temperature
+2. Implement load testing with Locust
+3. Add cost analysis dashboard
+4. Create DynamoDB backup automation
+5. Implement API authentication with Cognito
+
+## Interview Talking Points
+
+**You built this to learn:**
+- Event-driven cloud architectures
+- Serverless patterns and trade-offs
+- Infrastructure automation with Terraform
+- AWS service integration
+- DevOps CI/CD basics
+
+**You can explain:**
+- Why DynamoDB for current state (fast queries)
+- Why S3 for historical data (cost-effective storage)
+- Why Lambda instead of EC2 (event-driven workload)
+- Trade-offs between managed services and custom solutions
+- Basic cloud cost optimization
+
+## Support
+
+This is a learning project. For questions:
+- Review AWS documentation
+- Check Terraform provider docs
+- Examine inline code comments

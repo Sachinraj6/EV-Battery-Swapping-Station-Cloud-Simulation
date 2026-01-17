@@ -1,0 +1,243 @@
+# terraform/s3.tf
+#
+# PURPOSE: Create S3 bucket for storing historical telemetry data
+#
+# WHY THIS FILE EXISTS:
+# - Need durable, cheap storage for raw telemetry (millions of messages)
+# - S3 costs ~$0.023/GB vs DynamoDB ~$0.25/GB for storage
+# - Enables future analytics without keeping everything in DynamoDB
+#
+# DESIGN CHOICE: Why S3 over database?
+# - Much cheaper for rarely-accessed historical data
+# - Can store raw JSON directly (no schema needed)
+# - Easy to process with Athena, EMR, or Lambda later
+# - Lifecycle policies automatically move old data to even cheaper storage
+
+# ==============================================================================
+# S3 BUCKET FOR TELEMETRY DATA
+# ==============================================================================
+
+resource "aws_s3_bucket" "telemetry_data" {
+  # Bucket name must be globally unique across ALL AWS accounts
+  # WHY: S3 bucket names are DNS names (bucket-name.s3.amazonaws.com)
+  bucket = "${local.name_prefix}-telemetry-${local.account_id}"
+  
+  # Force destroy allows Terraform to delete bucket even if not empty
+  # WHY: Useful for dev/test, dangerous for production
+  # CAUTION: Set to false in production to prevent accidental data loss
+  force_destroy = var.environment != "prod"
+
+  tags = merge(
+    local.common_tags,
+    {
+      Name        = "${local.name_prefix}-telemetry-data"
+      Description = "Historical telemetry data from EV swap stations"
+      DataType    = "time-series-telemetry"
+    }
+  )
+}
+
+# ==============================================================================
+# S3 BUCKET VERSIONING
+# ==============================================================================
+
+# Enable versioning to protect against accidental overwrites/deletes
+# WHY: If Lambda accidentally overwrites a file, old version is kept
+resource "aws_s3_bucket_versioning" "telemetry_data" {
+  bucket = aws_s3_bucket.telemetry_data.id
+
+  versioning_configuration {
+    # MFA delete requires MFA device to delete (extra security)
+    # Disabled for prototype - would require hardware token
+    status     = var.environment == "prod" ? "Enabled" : "Suspended"
+    mfa_delete = "Disabled"
+  }
+}
+
+# ==============================================================================
+# S3 BUCKET ENCRYPTION
+# ==============================================================================
+
+# Enable server-side encryption for all objects
+# WHY: Data security best practice, often required by compliance
+resource "aws_s3_bucket_server_side_encryption_configuration" "telemetry_data" {
+  bucket = aws_s3_bucket.telemetry_data.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      # SSE-S3: AWS manages encryption keys (free)
+      # SSE-KMS: You control keys via KMS (costs extra, more control)
+      sse_algorithm = "AES256"  # SSE-S3
+      # kms_master_key_id = aws_kms_key.s3.arn  # For SSE-KMS
+    }
+    bucket_key_enabled = true  # Reduces KMS costs if using SSE-KMS
+  }
+}
+
+# ==============================================================================
+# S3 BUCKET PUBLIC ACCESS BLOCK
+# ==============================================================================
+
+# Block all public access - this is CRITICAL for security
+# WHY: Telemetry data should never be publicly accessible
+# HORROR STORY: Many data breaches from misconfigured S3 buckets
+resource "aws_s3_bucket_public_access_block" "telemetry_data" {
+  bucket = aws_s3_bucket.telemetry_data.id
+
+  # Block public ACLs (Access Control Lists)
+  block_public_acls       = true
+  
+  # Ignore any public ACLs that might exist
+  ignore_public_acls      = true
+  
+  # Block public bucket policies
+  block_public_policy     = true
+  
+  # Restrict cross-account access
+  restrict_public_buckets = true
+}
+
+# ==============================================================================
+# S3 LIFECYCLE POLICY FOR COST OPTIMIZATION
+# ==============================================================================
+
+# Automatically transition old data to cheaper storage tiers
+# WHY: Recent data accessed frequently, old data rarely accessed
+# COST EXAMPLE: Standard $0.023/GB, Glacier $0.004/GB (5x cheaper)
+resource "aws_s3_bucket_lifecycle_configuration" "telemetry_data" {
+  bucket = aws_s3_bucket.telemetry_data.id
+
+  # Rule 1: Move old telemetry to Glacier (cold storage)
+  rule {
+    id     = "archive-old-telemetry"
+    status = "Enabled"
+
+    # Apply to all objects with "telemetry/" prefix
+    filter {
+      prefix = "telemetry/"
+    }
+
+    # Transition to Glacier after X days
+    # WHY: Old telemetry rarely accessed, save money
+    transition {
+      days          = var.s3_glacier_transition_days
+      storage_class = "GLACIER"  # Very cheap, takes hours to retrieve
+    }
+
+    # Optional: Transition to Glacier Deep Archive (even cheaper)
+    # transition {
+    #   days          = 365  # After 1 year
+    #   storage_class = "DEEP_ARCHIVE"  # Cheapest, takes 12+ hours to retrieve
+    # }
+
+    # Optional: Delete very old data
+    # expiration {
+    #   days = 730  # Delete after 2 years
+    # }
+  }
+
+  # Rule 2: Clean up incomplete multipart uploads
+  # WHY: Failed uploads waste storage space and cost money
+  rule {
+    id     = "cleanup-incomplete-uploads"
+    status = "Enabled"
+
+    # Delete incomplete uploads after 7 days
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+  }
+
+  # Rule 3: Delete old versions (if versioning enabled)
+  # WHY: Old versions accumulate and cost money
+  rule {
+    id     = "expire-old-versions"
+    status = var.environment == "prod" ? "Enabled" : "Disabled"
+
+    # Keep non-current versions for 30 days, then delete
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+}
+
+# ==============================================================================
+# S3 OBJECT STRUCTURE (for documentation)
+# ==============================================================================
+# Files will be organized like:
+# s3://bucket-name/
+#   ├── telemetry/
+#   │   ├── year=2024/
+#   │   │   ├── month=01/
+#   │   │   │   ├── day=15/
+#   │   │   │   │   ├── station-01_20240115_143045_abc123.json
+#   │   │   │   │   ├── station-02_20240115_143046_def456.json
+#   │   │   │   │   └── ...
+#   │   │   │   └── day=16/
+#   │   │   └── month=02/
+#   │   └── year=2025/
+#   └── processed/  (for future analytics results)
+#
+# WHY THIS STRUCTURE:
+# - Partitioned by date for efficient querying (Athena, EMR)
+# - Year/month/day folders make lifecycle policies work well
+# - Filename includes timestamp and random ID for uniqueness
+# - JSON format is human-readable and easily processed
+
+# ==============================================================================
+# S3 BUCKET NOTIFICATION (Optional)
+# ==============================================================================
+# Uncomment to trigger Lambda when new files arrive in S3
+# WHY: Could process/validate data immediately after upload
+#
+# resource "aws_s3_bucket_notification" "telemetry_data_notification" {
+#   bucket = aws_s3_bucket.telemetry_data.id
+#
+#   lambda_function {
+#     lambda_function_arn = aws_lambda_function.process_telemetry.arn
+#     events              = ["s3:ObjectCreated:*"]
+#     filter_prefix       = "telemetry/"
+#     filter_suffix       = ".json"
+#   }
+#
+#   depends_on = [aws_lambda_permission.allow_s3_invoke]
+# }
+
+# ==============================================================================
+# CLOUDWATCH METRICS FOR MONITORING
+# ==============================================================================
+
+# Metric filter: Track number of files uploaded
+# WHY: Monitor ingestion rate, detect issues
+resource "aws_cloudwatch_log_metric_filter" "s3_uploads" {
+  name           = "${local.name_prefix}-s3-upload-count"
+  log_group_name = "/aws/lambda/${aws_lambda_function.telemetry_handler.function_name}"
+  
+  pattern = "[timestamp, request_id, level = INFO, msg = \"Uploaded to S3:\", ...]"
+  
+  metric_transformation {
+    name      = "S3Uploads"
+    namespace = "EVSwapStations"
+    value     = "1"
+    unit      = "Count"
+  }
+}
+
+# ==============================================================================
+# OUTPUTS
+# ==============================================================================
+
+output "s3_bucket_name" {
+  description = "Name of S3 bucket for telemetry data"
+  value       = aws_s3_bucket.telemetry_data.id
+}
+
+output "s3_bucket_arn" {
+  description = "ARN of S3 bucket for telemetry data"
+  value       = aws_s3_bucket.telemetry_data.arn
+}
+
+output "s3_bucket_domain" {
+  description = "Domain name of S3 bucket"
+  value       = aws_s3_bucket.telemetry_data.bucket_domain_name
+}

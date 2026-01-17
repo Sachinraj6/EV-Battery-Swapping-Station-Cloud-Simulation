@@ -1,0 +1,78 @@
+# terraform/main.tf
+# 
+# PURPOSE: Main Terraform configuration file that sets up the AWS provider
+# and defines core infrastructure settings for the EV battery-swap system.
+#
+# WHY THIS FILE EXISTS: 
+# - Terraform needs to know which cloud provider to use (AWS in our case)
+# - We define the AWS region and how Terraform should store its state
+# - This is the entry point for our infrastructure code
+
+# Specify the required Terraform version and AWS provider version
+# WHY: Ensures everyone uses compatible versions, preventing "works on my machine" issues
+terraform {
+  required_version = ">= 1.0"
+  
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 5.0"  # Use AWS provider version 5.x
+    }
+  }
+
+  # Backend configuration for storing Terraform state
+  # WHY: Terraform needs to track what resources it created
+  # NOTE: For production, use S3 backend with DynamoDB locking
+  # For learning/prototype, local state is fine
+  # backend "s3" {
+  #   bucket = "your-terraform-state-bucket"
+  #   key    = "ev-stations/terraform.tfstate"
+  #   region = "us-east-1"
+  # }
+}
+
+# Configure the AWS Provider
+# WHY: Tells Terraform which AWS region to create resources in
+provider "aws" {
+  region = var.aws_region
+
+  # Default tags applied to ALL resources
+  # WHY: Helps with cost tracking, organization, and identifying resources
+  default_tags {
+    tags = {
+      Project     = "EV-Battery-Swap"
+      Environment = var.environment
+      ManagedBy   = "Terraform"
+      Purpose     = "Learning-Prototype"
+    }
+  }
+}
+
+# Data source to get current AWS account ID
+# WHY: We need this for IAM policies and resource ARNs
+# CONCEPT: Data sources fetch information, they don't create resources
+data "aws_caller_identity" "current" {}
+
+# Data source to get current AWS region
+# WHY: Useful for constructing ARNs and region-specific configurations
+data "aws_region" "current" {}
+
+# Local values for reuse across the configuration
+# WHY: Defines common values once, use everywhere - reduces duplication
+locals {
+  # Prefix for naming resources consistently
+  # EXAMPLE: "ev-swap-dev" or "ev-swap-prod"
+  name_prefix = "${var.project_name}-${var.environment}"
+  
+  # Common tags that can be merged with resource-specific tags
+  common_tags = {
+    Project     = var.project_name
+    Environment = var.environment
+  }
+  
+  # AWS account ID (from data source above)
+  account_id = data.aws_caller_identity.current.account_id
+  
+  # Current region (from data source above)
+  region = data.aws_region.current.name
+}

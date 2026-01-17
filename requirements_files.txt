@@ -1,0 +1,186 @@
+# ==========================================
+# lambda/requirements.txt
+# ==========================================
+#
+# PURPOSE: Python dependencies for Lambda functions
+#
+# WHY THIS FILE:
+# - Lambda needs boto3 for AWS SDK
+# - Specifies exact versions for reproducibility
+# - Enables automated dependency installation
+#
+# USAGE:
+# pip install -r requirements.txt
+
+# AWS SDK for Python
+# WHY: Interact with DynamoDB, S3, and other AWS services
+# NOTE: Lambda runtime includes boto3, but specifying version ensures consistency
+boto3>=1.34.0,<2.0.0
+
+# AWS SDK Core (dependency of boto3)
+botocore>=1.34.0,<2.0.0
+
+# For JSON schema validation (optional but recommended)
+# WHY: Validate telemetry data structure
+jsonschema>=4.20.0,<5.0.0
+
+# For datetime handling with timezone support
+# WHY: Handle ISO-8601 timestamps correctly
+python-dateutil>=2.8.2,<3.0.0
+
+# ==========================================
+# DEVELOPMENT DEPENDENCIES (not for Lambda)
+# ==========================================
+# Install separately for development:
+# pip install -r requirements-dev.txt
+
+# Code formatting
+# black>=23.0.0
+# Code linting
+# pylint>=3.0.0
+# flake8>=7.0.0
+# Testing
+# pytest>=7.4.0
+# pytest-cov>=4.1.0
+# moto>=4.2.0  # Mock AWS services for testing
+
+
+# ==========================================
+# simulation/requirements.txt
+# ==========================================
+#
+# PURPOSE: Python dependencies for station simulator
+#
+# WHY THIS FILE:
+# - Simulator needs AWS IoT SDK for MQTT
+# - Separate from Lambda (different runtime environment)
+#
+# USAGE:
+# cd simulation
+# pip install -r requirements.txt
+
+# AWS IoT SDK for Python
+# WHY: MQTT client for connecting to AWS IoT Core
+awsiotsdk>=1.20.0,<2.0.0
+
+# AWS CRT (Common Runtime) - dependency of IoT SDK
+# WHY: Low-level networking and cryptography
+awscrt>=0.19.0,<1.0.0
+
+# For colored console output (optional)
+# WHY: Makes simulator logs easier to read
+colorama>=0.4.6,<1.0.0
+
+# For command line argument parsing (built-in, listed for documentation)
+# argparse  # Built into Python 3.x
+
+
+# ==========================================
+# PACKAGE SIZE OPTIMIZATION
+# ==========================================
+#
+# Lambda deployment packages have size limits:
+# - Deployment package: 50 MB (zipped)
+# - Unzipped: 250 MB
+#
+# TIPS TO REDUCE SIZE:
+# 1. Only include necessary packages
+# 2. Remove .pyc files and __pycache__
+# 3. Use Lambda Layers for large dependencies
+# 4. Strip unnecessary files from packages
+#
+# Example: Exclude test files when packaging
+# find . -type d -name "tests" -exec rm -rf {} +
+# find . -type d -name "__pycache__" -exec rm -rf {} +
+# find . -type f -name "*.pyc" -delete
+
+
+# ==========================================
+# VERSION PINNING STRATEGY
+# ==========================================
+#
+# WHY USE VERSION RANGES (>=X,<Y):
+# - Allow minor/patch updates (bug fixes, security)
+# - Prevent major version breaks
+# - Balance stability vs. getting updates
+#
+# ALTERNATIVES:
+#
+# 1. EXACT PINNING (for maximum reproducibility):
+#    boto3==1.34.51
+#    - Pros: Guaranteed same behavior everywhere
+#    - Cons: Miss security patches, manual updates needed
+#
+# 2. LOOSE PINNING (for maximum compatibility):
+#    boto3>=1.34.0
+#    - Pros: Always get latest
+#    - Cons: Risk of breaking changes
+#
+# 3. HASH VERIFICATION (for maximum security):
+#    boto3==1.34.51 \
+#      --hash=sha256:abc123...
+#    - Pros: Prevents supply chain attacks
+#    - Cons: More complex to maintain
+#
+# FOR THIS PROJECT:
+# Using range pinning (>=X,<Y) as a good balance for learning
+
+
+# ==========================================
+# LAMBDA LAYERS ALTERNATIVE
+# ==========================================
+#
+# For production, consider using Lambda Layers:
+#
+# WHY:
+# - Share dependencies across multiple functions
+# - Reduce deployment package size
+# - Faster deployments (layer cached)
+#
+# HOW:
+# 1. Create layer with dependencies:
+#    mkdir python
+#    pip install -r requirements.txt -t python/
+#    zip -r layer.zip python/
+#
+# 2. Upload layer to AWS:
+#    aws lambda publish-layer-version \
+#      --layer-name boto3-layer \
+#      --zip-file fileb://layer.zip \
+#      --compatible-runtimes python3.11
+#
+# 3. Reference layer in Terraform:
+#    resource "aws_lambda_function" "example" {
+#      layers = [aws_lambda_layer_version.boto3.arn]
+#    }
+#
+# WHEN TO USE LAYERS:
+# - Multiple Lambda functions share dependencies
+# - Large dependencies (ML libraries, etc.)
+# - Frequent code updates but stable dependencies
+
+
+# ==========================================
+# DEPENDENCY UPDATES
+# ==========================================
+#
+# CHECKING FOR UPDATES:
+# pip list --outdated
+#
+# UPDATING DEPENDENCIES:
+# pip install --upgrade boto3
+#
+# SECURITY UPDATES:
+# pip install safety
+# safety check
+#
+# AUTOMATED UPDATES (GitHub):
+# - Use Dependabot to auto-create PRs for updates
+# - Add .github/dependabot.yml:
+#
+# version: 2
+# updates:
+#   - package-ecosystem: "pip"
+#     directory: "/lambda"
+#     schedule:
+#       interval: "weekly"

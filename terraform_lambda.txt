@@ -1,0 +1,384 @@
+# terraform/lambda.tf
+#
+# PURPOSE: Deploy Lambda functions for telemetry processing and API handling
+#
+# WHY THIS FILE EXISTS:
+# - Lambda is our compute layer (serverless functions)
+# - Processes events without managing servers
+# - Auto-scales based on load
+#
+# TWO LAMBDA FUNCTIONS:
+# 1. Telemetry Handler: Processes IoT messages -> DynamoDB + S3
+# 2. API Handler: Serves HTTP requests -> Queries DynamoDB
+
+# ==============================================================================
+# PACKAGE LAMBDA FUNCTIONS
+# ==============================================================================
+
+# Archive telemetry handler code into ZIP file
+# WHY: Lambda requires code packaged as ZIP or container image
+data "archive_file" "telemetry_handler" {
+  type        = "zip"
+  source_dir  = "${path.module}/../lambda"  # Directory with Python files
+  output_path = "${path.module}/telemetry_handler.zip"
+  
+  # Only include specific files
+  # WHY: Keep deployment package small (faster uploads)
+  excludes = [
+    "__pycache__",
+    "*.pyc",
+    "tests",
+    ".pytest_cache"
+  ]
+}
+
+# Archive API handler code into ZIP file
+# NOTE: In production, would separate into different directories
+# For this prototype, both functions in same folder is fine
+data "archive_file" "api_handler" {
+  type        = "zip"
+  source_dir  = "${path.module}/../lambda"
+  output_path = "${path.module}/api_handler.zip"
+  
+  excludes = [
+    "__pycache__",
+    "*.pyc",
+    "tests",
+    ".pytest_cache"
+  ]
+}
+
+# ==============================================================================
+# CLOUDWATCH LOG GROUPS
+# ==============================================================================
+
+# Log group for telemetry handler
+# WHY: Must create before Lambda to set retention policy
+# Without this, Lambda creates log group with infinite retention ($$)
+resource "aws_cloudwatch_log_group" "telemetry_handler" {
+  name              = "/aws/lambda/${local.name_prefix}-telemetry-handler"
+  retention_in_days = var.cloudwatch_log_retention_days
+  
+  # KMS encryption for logs (optional, adds security)
+  # kms_key_id = aws_kms_key.cloudwatch.arn
+  
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${local.name_prefix}-telemetry-handler-logs"
+    }
+  )
+}
+
+# Log group for API handler
+resource "aws_cloudwatch_log_group" "api_handler" {
+  name              = "/aws/lambda/${local.name_prefix}-api-handler"
+  retention_in_days = var.cloudwatch_log_retention_days
+  
+  tags = merge(
+    local.common_tags,
+    {
+      Name = "${local.name_prefix}-api-handler-logs"
+    }
+  )
+}
+
+# ==============================================================================
+# LAMBDA FUNCTION: TELEMETRY HANDLER
+# ==============================================================================
+
+resource "aws_lambda_function" "telemetry_handler" {
+  # Function name - must be unique in AWS account + region
+  function_name = "${local.name_prefix}-telemetry-handler"
+  description   = "Process telemetry from EV swap stations"
+  
+  # Deployment package
+  filename         = data.archive_file.telemetry_handler.output_path
+  source_code_hash = data.archive_file.telemetry_handler.output_base64sha256
+  # WHY source_code_hash: Terraform detects code changes and redeploys
+  
+  # Runtime and handler
+  runtime = var.lambda_runtime  # python3.11
+  handler = "telemetry_handler.lambda_handler"
+  # FORMAT: filename.function_name
+  # Lambda looks for lambda_handler() in telemetry_handler.py
+  
+  # IAM role with permissions
+  role = aws_iam_role.lambda_telemetry_role.arn
+  
+  # Resource allocation
+  # WHY: More memory = more CPU power = faster execution
+  # COST: Charged for GB-seconds (memory * duration)
+  memory_size = var.lambda_memory_size  # 256 MB
+  timeout     = var.lambda_timeout      # 30 seconds
+  
+  # Environment variables
+  # WHY: Makes Lambda configurable without code changes
+  environment {
+    variables = {
+      DYNAMODB_TABLE_NAME = aws_dynamodb_table.stations.name
+      S3_BUCKET_NAME      = aws_s3_bucket.telemetry_data.id
+      ENVIRONMENT         = var.environment
+      LOG_LEVEL           = var.environment == "prod" ? "INFO" : "DEBUG"
+    }
+  }
+  
+  # Reserved concurrent executions
+  # WHY: Limits Lambda from consuming all account concurrency
+  # PROD TIP: Set to expected max load + buffer
+  # reserved_concurrent_executions = 100
+  
+  # VPC configuration (if needed)
+  # WHY: Required if Lambda needs to access VPC resources (RDS, etc.)
+  # NOT needed for our case (DynamoDB, S3, IoT are public services)
+  # vpc_config {
+  #   subnet_ids         = var.private_subnet_ids
+  #   security_group_ids = [aws_security_group.lambda.id]
+  # }
+  
+  # Dead letter queue for failed invocations
+  # WHY: Captures failed events for debugging/retry
+  # dead_letter_config {
+  #   target_arn = aws_sqs_queue.lambda_dlq.arn
+  # }
+  
+  # Tracing with X-Ray (optional)
+  # WHY: Detailed performance analysis and debugging
+  # COST: Small charge per trace
+  tracing_config {
+    mode = var.environment == "prod" ? "Active" : "PassThrough"
+  }
+  
+  # Depends on log group being created first
+  # WHY: Ensures retention policy is set before logs written
+  depends_on = [
+    aws_cloudwatch_log_group.telemetry_handler,
+    aws_iam_role_policy.lambda_telemetry_policy
+  ]
+  
+  tags = merge(
+    local.common_tags,
+    {
+      Name        = "${local.name_prefix}-telemetry-handler"
+      Description = "Processes IoT telemetry and stores in DynamoDB/S3"
+    }
+  )
+}
+
+# ==============================================================================
+# LAMBDA FUNCTION: API HANDLER
+# ==============================================================================
+
+resource "aws_lambda_function" "api_handler" {
+  function_name = "${local.name_prefix}-api-handler"
+  description   = "Handle API Gateway requests for station data"
+  
+  # Deployment package
+  filename         = data.archive_file.api_handler.output_path
+  source_code_hash = data.archive_file.api_handler.output_base64sha256
+  
+  # Runtime and handler
+  runtime = var.lambda_runtime
+  handler = "api_handler.lambda_handler"
+  
+  # IAM role (read-only permissions)
+  role = aws_iam_role.lambda_api_role.arn
+  
+  # Resource allocation
+  # WHY: API reads are fast, don't need much memory
+  memory_size = 256  # Can be lower than telemetry handler
+  timeout     = 10   # API should respond quickly
+  
+  # Environment variables
+  environment {
+    variables = {
+      DYNAMODB_TABLE_NAME = aws_dynamodb_table.stations.name
+      ENVIRONMENT         = var.environment
+      LOG_LEVEL           = var.environment == "prod" ? "INFO" : "DEBUG"
+    }
+  }
+  
+  # Provisioned concurrency (optional)
+  # WHY: Eliminates cold starts for consistent API latency
+  # COST: Expensive - only use for production critical APIs
+  # provisioned_concurrent_executions = 2
+  
+  tracing_config {
+    mode = var.environment == "prod" ? "Active" : "PassThrough"
+  }
+  
+  depends_on = [
+    aws_cloudwatch_log_group.api_handler,
+    aws_iam_role_policy.lambda_api_policy
+  ]
+  
+  tags = merge(
+    local.common_tags,
+    {
+      Name        = "${local.name_prefix}-api-handler"
+      Description = "Serves API requests for station status"
+    }
+  )
+}
+
+# ==============================================================================
+# LAMBDA PERMISSIONS
+# ==============================================================================
+
+# Allow IoT Core to invoke telemetry handler
+# WHY: By default, services can't invoke your Lambda
+resource "aws_lambda_permission" "allow_iot" {
+  statement_id  = "AllowExecutionFromIoT"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.telemetry_handler.function_name
+  principal     = "iot.amazonaws.com"
+  
+  # Only allow from our specific IoT Rule
+  # WHY: Principle of least privilege
+  source_arn = aws_iot_topic_rule.telemetry_rule.arn
+}
+
+# Allow API Gateway to invoke API handler
+# WHY: API Gateway needs explicit permission
+resource "aws_lambda_permission" "allow_api_gateway" {
+  statement_id  = "AllowExecutionFromAPIGateway"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.api_handler.function_name
+  principal     = "apigateway.amazonaws.com"
+  
+  # Allow from any API Gateway in this account
+  # SECURITY: Could restrict to specific API Gateway ARN
+  source_arn = "${aws_api_gateway_rest_api.stations_api.execution_arn}/*/*"
+  # Format: arn:aws:execute-api:region:account:api-id/stage/method/path
+}
+
+# ==============================================================================
+# CLOUDWATCH ALARMS FOR LAMBDA MONITORING
+# ==============================================================================
+
+# Alarm: High error rate for telemetry handler
+# WHY: Detect when Lambda is failing frequently
+resource "aws_cloudwatch_metric_alarm" "telemetry_handler_errors" {
+  alarm_name          = "${local.name_prefix}-telemetry-handler-errors"
+  alarm_description   = "Alert when telemetry handler has high error rate"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "Errors"
+  namespace           = "AWS/Lambda"
+  period              = 300  # 5 minutes
+  statistic           = "Sum"
+  threshold           = 10   # More than 10 errors in 5 minutes
+  treat_missing_data  = "notBreaching"
+  
+  dimensions = {
+    FunctionName = aws_lambda_function.telemetry_handler.function_name
+  }
+  
+  # In production, add SNS notifications
+  # alarm_actions = [aws_sns_topic.alerts.arn]
+  
+  tags = local.common_tags
+}
+
+# Alarm: Lambda throttling (hitting concurrency limit)
+# WHY: Indicates need to increase reserved concurrency
+resource "aws_cloudwatch_metric_alarm" "telemetry_handler_throttles" {
+  alarm_name          = "${local.name_prefix}-telemetry-handler-throttles"
+  alarm_description   = "Alert when telemetry handler is throttled"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "Throttles"
+  namespace           = "AWS/Lambda"
+  period              = 60
+  statistic           = "Sum"
+  threshold           = 5
+  treat_missing_data  = "notBreaching"
+  
+  dimensions = {
+    FunctionName = aws_lambda_function.telemetry_handler.function_name
+  }
+  
+  tags = local.common_tags
+}
+
+# Alarm: High duration (slow execution)
+# WHY: Indicates performance issues or timeout risk
+resource "aws_cloudwatch_metric_alarm" "telemetry_handler_duration" {
+  alarm_name          = "${local.name_prefix}-telemetry-handler-duration"
+  alarm_description   = "Alert when telemetry handler execution is slow"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "Duration"
+  namespace           = "AWS/Lambda"
+  period              = 300
+  statistic           = "Average"
+  threshold           = 5000  # 5 seconds average (out of 30s timeout)
+  treat_missing_data  = "notBreaching"
+  
+  dimensions = {
+    FunctionName = aws_lambda_function.telemetry_handler.function_name
+  }
+  
+  tags = local.common_tags
+}
+
+# Alarm: API handler errors
+resource "aws_cloudwatch_metric_alarm" "api_handler_errors" {
+  alarm_name          = "${local.name_prefix}-api-handler-errors"
+  alarm_description   = "Alert when API handler has high error rate"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 2
+  metric_name         = "Errors"
+  namespace           = "AWS/Lambda"
+  period              = 300
+  statistic           = "Sum"
+  threshold           = 5
+  treat_missing_data  = "notBreaching"
+  
+  dimensions = {
+    FunctionName = aws_lambda_function.api_handler.function_name
+  }
+  
+  tags = local.common_tags
+}
+
+# ==============================================================================
+# LAMBDA INSIGHTS (Enhanced Monitoring)
+# ==============================================================================
+
+# Lambda Insights Layer (optional)
+# WHY: Provides detailed performance metrics and logs
+# COST: Small additional charge
+# BENEFIT: Better visibility into Lambda performance
+#
+# resource "aws_lambda_function" "telemetry_handler" {
+#   # ... existing config ...
+#   
+#   layers = [
+#     "arn:aws:lambda:${local.region}:580247275435:layer:LambdaInsightsExtension:21"
+#   ]
+# }
+
+# ==============================================================================
+# OUTPUTS
+# ==============================================================================
+
+output "telemetry_handler_arn" {
+  description = "ARN of telemetry handler Lambda function"
+  value       = aws_lambda_function.telemetry_handler.arn
+}
+
+output "telemetry_handler_name" {
+  description = "Name of telemetry handler Lambda function"
+  value       = aws_lambda_function.telemetry_handler.function_name
+}
+
+output "api_handler_arn" {
+  description = "ARN of API handler Lambda function"
+  value       = aws_lambda_function.api_handler.arn
+}
+
+output "api_handler_name" {
+  description = "Name of API handler Lambda function"
+  value       = aws_lambda_function.api_handler.function_name
+}
